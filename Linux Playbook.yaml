@@ -1,0 +1,136 @@
+---
+- name: Linux System Configuration Playbook
+  hosts: all
+  become: yes  
+
+  vars:
+    system_user: "deploy_user"
+    ssh_port: 2222
+    packages:
+      - nginx
+      - git
+      - python3
+      - vim
+    firewall_ports:
+      - 22
+      - 80
+      - 443
+
+  tasks:
+
+    # SYSTEM UPDATE & PACKAGE MANAGEMENT
+    - name: Update system package cache
+      apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install essential packages
+      apt:
+        name: "{{ packages }}"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    # USER & GROUP MANAGEMENT
+    - name: Create a new user
+      user:
+        name: "{{ system_user }}"
+        shell: /bin/bash
+        password: "{{ 'securepassword' | password_hash('sha512') }}"
+        groups: sudo
+        append: yes
+
+    # FILE & DIRECTORY MANAGEMENT
+    - name: Create a directory for deployments
+      file:
+        path: /opt/deployments
+        state: directory
+        owner: "{{ system_user }}"
+        group: "{{ system_user }}"
+        mode: "0755"
+
+    - name: Deploy a sample config file
+      copy:
+        src: files/sample.conf
+        dest: /etc/sample.conf
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Ensure an environment variable is set
+      lineinfile:
+        path: /etc/environment
+        line: "APP_ENV=production"
+
+    # NETWORKING & FIREWALL
+    - name: Open necessary firewall ports
+      firewalld:
+        port: "{{ item }}/tcp"
+        permanent: yes
+        state: enabled
+      loop: "{{ firewall_ports }}"
+      notify: Restart Firewalld
+
+    - name: Configure SSH to use a different port
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^#?Port"
+        line: "Port {{ ssh_port }}"
+      notify: Restart SSH
+
+    # SERVICE MANAGEMENT
+    - name: Start and enable Nginx service
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    # STORAGE & FILESYSTEM
+    - name: Ensure a partition is mounted
+      mount:
+        path: /mnt/data
+        src: /dev/sdb1
+        fstype: ext4
+        state: mounted
+
+    # DATABASE MANAGEMENT
+    - name: Ensure MySQL database exists
+      mysql_db:
+        name: sample_db
+        state: present
+
+    - name: Create a MySQL user
+      mysql_user:
+        name: "db_{{ system_user }}"
+        password: "Cosmos_X"
+        priv: "sample_db.*:ALL"
+        state: present
+
+    # MONITORING & SCHEDULED TASKS
+    - name: Set up a cron job for log cleanup
+      cron:
+        name: "Log Cleanup"
+        job: "find /var/log -type f -name '*.log' -mtime +7 -delete"
+        minute: "0"
+        hour: "2"
+
+    # DEBUGGING & LOGGING
+    - name: Fetch system logs
+      fetch:
+        src: /var/log/syslog
+        dest: ./logs/
+        flat: yes
+
+    - name: Display a debug message
+      debug:
+        msg: "Ansible Playbook Executed"
+
+  handlers:
+    - name: Restart Firewalld
+      service:
+        name: firewalld
+        state: restarted
+
+    - name: Restart SSH
+      service:
+        name: sshd
+        state: restarted
