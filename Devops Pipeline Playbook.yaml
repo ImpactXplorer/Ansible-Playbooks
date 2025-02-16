@@ -1,0 +1,129 @@
+---
+- name: DevOps Pipeline Setup 
+  hosts: devops_servers
+  become: yes
+  vars:
+    jenkins_plugins:
+      - git
+      - docker-plugin
+      - kubernetes
+      - pipeline
+      - helm
+      - sonar
+      - nexus-artifact-uploader
+    docker_user: "ImpactXplorer"
+    docker_password: "{{ lookup('env', 'DOCKER_PASSWORD') }}"  # Secure password storage
+    k8s_namespace: "devops"
+    nexus_version: "3.41.1"
+
+  tasks:
+
+    ## Install Required Packages
+    - name: Install Required Packages
+      apt:
+        name:
+          - apt-transport-https
+          - openjdk-11-jdk
+          - jenkins
+          - docker.io
+          - kubectl
+          - helm
+          - git
+        state: present
+        update_cache: yes
+
+    ## Start & Enable Services
+    - name: Enable and Start Services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - jenkins
+        - docker
+
+    ## Add Jenkins User to Docker Group
+    - name: Add Jenkins User to Docker Group
+      user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    ## Install Jenkins Plugins One by One
+    - name: Install Jenkins Plugins One by One
+      jenkins_plugin:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ jenkins_plugins }}"
+      notify: Restart Jenkins
+
+    - meta: flush_handlers  # Ensures Jenkins restarts after each plugin
+
+    ## Install SonarQube for Code Quality Analysis
+    - name: Install SonarQube
+      docker_container:
+        name: sonarqube
+        image: sonarqube:lts
+        state: started
+        restart_policy: always
+        ports:
+          - "9000:9000"
+
+    ## Install Nexus Repository for Artifact Storage
+    - name: Install Nexus Repository Manager
+      docker_container:
+        name: nexus
+        image: sonatype/nexus3:{{ nexus_version }}
+        state: started
+        restart_policy: always
+        ports:
+          - "8081:8081"
+
+    ## Configure Docker Login as Jenkins User
+    - name: Configure Docker Login
+      become_user: jenkins
+      docker_login:
+        username: "{{ docker_user }}"
+        password: "{{ docker_password }}"
+
+    ## Create Kubernetes Namespace
+    - name: Create Kubernetes Namespace
+      kubernetes.core.k8s:
+        name: "{{ k8s_namespace }}"
+        api_version: v1
+        kind: Namespace
+        state: present
+
+    ## Deploy Nginx Ingress Controller for Kubernetes
+    - name: Deploy Nginx Ingress Controller
+      kubernetes.core.helm:
+        name: ingress-nginx
+        chart_ref: ingress-nginx
+        release_namespace: "{{ k8s_namespace }}"
+        state: present
+
+    - name: Wait for Nginx Ingress Controller to be ready
+      wait_for:
+        timeout: 60
+
+    ## Deploy Application Using Helm
+    - name: Deploy App with Helm
+      kubernetes.core.helm:
+        name: my-app
+        chart_ref: bitnami/nginx
+        release_namespace: "{{ k8s_namespace }}"
+        state: present
+
+    ## Install Prometheus & Grafana for Monitoring
+    - name: Deploy Prometheus & Grafana
+      kubernetes.core.helm:
+        name: monitoring-stack
+        chart_ref: prometheus-community/kube-prometheus-stack
+        release_namespace: "{{ k8s_namespace }}"
+        state: present
+
+  handlers:
+    - name: Restart Jenkins
+      service:
+        name: jenkins
+        state: restarted
